@@ -1,54 +1,61 @@
 MODEL_CFG:
-  PRETRAINED: '' # '/home/guest/ocr_exp_v2/weight/layer5_relu_MULTI_NORM_0to1_ADAM_STEP/2023-01-31_min_loss.pth'
+  PRETRAINED: '' # '/home/guest/speaking_fridgey/ocr_exp_v2/weight/layer5_HENNET_Hangul_Converter_RGB_FINANCE_CROPED_SENTNECE_TARGETNUM_3e_4/2023-02-16_min_loss.pth' # '/home/guest/speaking_fridgey/ocr_exp_v2/weight/layer5_HENNET_Hangul_Converter_RGB_Package_/2023-02-11_min_loss.pth' # '/home/guest/ocr_exp_v2/weight/layer5_relu_MULTI_NORM_0to1_ADAM_STEP/2023-01-31_min_loss.pth'
   USE_RES: !!bool true # true # false
   SEPERABLE_FFN: !!bool true # true # false # true #  false ## Transformer Encoder의 FFN을 Convolution을 사용할지 말지
-  PRETRAINED_OPTIM: '' # '/home/guest/ocr_exp_v2/optim/layer5_relu_MULTI_NORM_0to1_ADAM_STEP/2023-01-31.pth'
-  ADAPTIVE_PE: !!bool false #  true # false # true # false # true
+  PRETRAINED_OPTIM: ''
+  MAKE_OBJECT_QUERY: !!bool true
+  ADAPTIVE_PE: !!bool false  # true
   TPS: !!bool false # true
-  BATCH_SIZE: !!int 300 # 128 # 300
+  BATCH_SIZE: !!int 300 # 300
   RES_IN: 32
   MAX_SEQ_LENGTH: 75 #  45 # 30 #75
-  ENCODER_LAYER_NUM: !!int 5 # 6 # 5 # 6 # 5 # 12 # 5 # 12 # 12 # 5 # 2 # 4
+  ENCODER_LAYER_NUM: !!int 5 # 6 # 5 # 6 # 5 # 12
   EMBEDDING_DIM: 512
+  ATTENTIONAL_TRANSFORMER: !!bool false # true # false
   FEED_FORWARD_DIM: 2048
   HEAD_NUM: !!int 8
-  IMG_W: 192 # 128 # 192
+  IMG_W: 192 # 128 # 192 # 128 # 192
   IMG_H: 32 # 128
+  USE_CONV: !!bool false #  true
   ACTIVATION: !!str 'RELU' # 'TANH' # 'LEAKYRELU' # 'GELU' # 'TANH' 
   RGB: !!bool true # false
 
 TRAIN_CFG:
   LOSS_FN: "CE" # "FOCAL" # 'SOFTCE'
+  LOSS_WEIGHT: !!bool false # true
+  NUM_WEIGHT: !!float 2.0
+  ENG_WEIGHT: !!float 2.0
   OPTIMIZER: 'ADAM' # 'SGD' # 'ADAM'
   SCHEDULER: 'STEP' # 'COSINE' # 'CYCLIC' # 
   MOMENTUM: 0.9
-  LR: !!float 3e-4 # 1e-4 # 1e-4 ## 3e-4 ## => 신기하게 ADAM은 1e-4 ~ 1e-5를 시작으로 잡는 것이, SGD는 0.1 ~ 0.01 정도를 시작 learning rate로 잡는 것이 효과적이다.
+  LR: !!float 2e-4 # 1e-4 # 1e-4 ## 3e-4 ## => 신기하게 ADAM은 1e-4 ~ 1e-5를 시작으로 잡는 것이, SGD는 0.1 ~ 0.01 정도를 시작 learning rate로 잡는 것이 효과적이다.
   DEBUG: !!bool false
-  BATCH_SIZE: 300 #  128 # 300
+  BATCH_SIZE: 300
   EPOCH: !!int 100
   EVAL_EPOCH: !!int 10
   WEIGHT_FOLDER: '/home/guest/speaking_fridgey/ocr_exp_v2/weight'
   OPTIM_FOLDER: '/home/guest/speaking_fridgey/ocr_exp_v2/optim'
 
 DATA_CFG:
-  RGB: !!bool true
-  USE_COSMETICS: !!bool true
+  RGB: !!bool true 
+  USE_BANK: !!bool false  # => 금
+  USE_COSMETICS: !!bool true 
   USE_MEDICINE: !!bool true
   IMG_H: !!int 32
-  IMG_W: !!int 192 # 128 # 192 # 128
+  IMG_W: !!int 192 # 128 
   MAX_LENGTH: !!int 75
-  CONVERTER: !!str "hangul" # "general" # "hangul"
-  TARGET_NUM: !!bool false # true # true
+  CONVERTER: !!str "hangul" # "general" 
+  TARGET_NUM: !!bool true  # false 
   TARGET_ENG: !!bool false #  true 솔직히 영어 부분은 그렇게 중요하다곤 생각이 안들기 때문에 적어도 숫자만큼은 완벽하게 인식할 수 있게하자
   TARGET_BOTH: !!bool false
   ## ADD_*얘네는 Label Converter 정의하는데 필요함
-  ADD_NUM: !!bool true # false # True # False
-  ADD_ENG: !!bool true # false # True # False
+  ADD_NUM: !!bool true # false 
+  ADD_ENG: !!bool true # false 
   RATIO: 
-    - 0.2
-    - 0.2
+    - 1.0 ## Croped Sentence Dataset Ratio
+    - 0.1 ## Package Dataset Ratio
   DATASET: 
-    # - 'HENDatasetV2'
+    - 'HENDatasetV2'
     - 'HENDatasetV3'
   USE_OUTDOOR: !!bool false
   BASE_FOLDER: '/home/guest/speaking_fridgey/ocr_exp_v2/data/printed_text' ## 학습을 text_recognition 폴더 내에서 시킬 것이기 때문에 

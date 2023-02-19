@@ -163,12 +163,14 @@ class HENDatasetOutdoor(BaseDataset):
     return tensor_image, label, text, select
 
 class HENDatasetV3(BaseDataset):
-  def __init__(self, mode, DATA_CFG, ratio, base_dir):
+  def __init__(self, mode, DATA_CFG, ratio, base_dir, target_num, target_eng, only_hangul=False):
     super().__init__(mode, DATA_CFG)
     self.base_dir=base_dir # '/home/guest/ocr_exp_v2/data/medicine_croped'
     self.data_cfg = DATA_CFG
     self.ratio = ratio
-    
+    self.target_num = target_num
+    self.target_eng = target_eng
+    self.only_hangul = only_hangul
     image_files = os.listdir(self.base_dir)
     image_files = [x for x in image_files if x.split('.')[-1] != 'txt']
     label_file = os.path.join(self.base_dir, 'new_target_data.txt')
@@ -176,6 +178,7 @@ class HENDatasetV3(BaseDataset):
     with open(label_file, 'r') as f:
       self.label_data = f.readlines()
     self._filter()
+    self._shuffle()
   
   def _shuffle(self):
     random.shuffle(self.label_data)
@@ -191,13 +194,14 @@ class HENDatasetV3(BaseDataset):
     if len(self.image_files) < len(self.label_data):
       self.label_data = self.label_data[:len(self.image_files)]
 
-    if self.add_eng == False and self.data_cfg['TARGET_ENG'] == True:
-      self.data_cfg['TARGET_ENG'] = False
-    if self.add_num == False and self.data_cfg['TARGET_NUM'] == True:
-      self.data_cfg['TARGET_NUM'] = False
+    if self.add_eng == False and self.target_eng == True: # self.data_cfg['TARGET_ENG'] == True:
+      self.target_eng = False # elf.data_cfg['TARGET_ENG'] = False
+    if self.add_num == False and self.target_num == True: # self.data_cfg['TARGET_NUM'] == True:
+      self.target_num = False  #self.data_cfg['TARGET_NUM'] = False
 
     # loop = tqdm(self.label_data)
     for idx, label_info in enumerate(self.label_data):
+
       image_name, text = label_info.strip('\n').split('\t')
      # image = cv2.imread(os.path.join(self.base_dir, image_name))
       # H, W, C = image.shape
@@ -212,16 +216,20 @@ class HENDatasetV3(BaseDataset):
         if len(text) > self.max_length:
           continue
 
+      if self.only_hangul:
+        han_found = re.findall(re.compile('[가-힣]'), text)
+        if len(han_found) == 0:
+          continue
       if self.data_cfg['TARGET_BOTH']:
         num_found = re.findall(re.compile('[0-9]'), text)
         eng_found = re.findall(re.compile('[a-zA-Z]'), text)
         if len(num_found)== 0 or len(eng_found) == 0:
           continue
-      if self.data_cfg["TARGET_NUM"]:
+      if self.target_num: # self.data_cfg["TARGET_NUM"]:
         found = re.findall(re.compile('[0-9]'), text)
         if len(found) == 0:
           continue
-      if self.data_cfg['TARGET_ENG']:
+      if self.target_eng: # self.data_cfg['TARGET_ENG']:
         found = re.findall(re.compile('[a-zA-Z]'), text)
         if len(found) == 0:
           continue
@@ -238,9 +246,10 @@ class HENDatasetV3(BaseDataset):
     self.label_data = new_label
 
   def __getitem__(self, idx):
-    idx = random.choice([int(i) for i in range(len(self.label_data))])
+    # idx = random.choice([int(i) for i in range(len(self.label_data))])
     label_data = self.label_data[idx]
     image_name, text = label_data.strip('\n').split('\t')
+
     image = cv2.imread(os.path.join(self.base_dir, image_name))
     if self.data_cfg['RGB'] == False:
       image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -263,12 +272,14 @@ class HENDatasetV2(BaseDataset):
   ## 오직 인쇄체 데이터셋만을 사용하기 위한 데이터셋
   def __init__(self, mode, DATA_CFG, ratio):
     super().__init__(mode, DATA_CFG)
-    base_dir=DATA_CFG['BASE_FOLDER']
+    base_dir=os.path.join(DATA_CFG['BASE_FOLDER'], 'croped_sentence')
+    self.base_dir=base_dir
     self.data_cfg = DATA_CFG
     self.ratio = ratio
-    data_files = os.listdir(os.path.join(base_dir, 'croped_sentence'))
-    self.image_files = sorted([x for x in data_files if x.split('.')[-1] == 'png'])
+    data_files = os.listdir(base_dir)
+    self.image_files = sorted(x for x in data_files if x.split('.')[-1] == 'png')
     label_data = list(set(data_files) - set(self.image_files))[0]
+    self.image_files = [os.path.join(base_dir, x) for x in self.image_files]
     label_data = os.path.join(base_dir, label_data)
     with open(label_data, 'r') as f:
       self.label_data = json.load(f)['annotations']
@@ -280,7 +291,7 @@ class HENDatasetV2(BaseDataset):
 
   def _filter(self):
     #out_of_char = f"[^{self.label_converter.char_with_no_tokens}]"
-    out_of_char = f"[^가-힣]"
+    out_of_char = f"[^ 가-힣a-zA-Z0-9]"
     filtered_label_data = []
     filtered_image_data = []
     for data in self.label_data:
@@ -293,10 +304,12 @@ class HENDatasetV2(BaseDataset):
           continue
 
       if re.search(out_of_char, text):
-        #print(text)
         continue
+
+      image_name = data['image'].split('/')[-1]
+      data['image'] = os.path.join(self.base_dir, image_name)
       filtered_label_data.append(data)
-      filtered_image_data.append(data['image'])
+      filtered_image_data.append(os.path.join(self.base_dir, image_name))
     self.label_data = filtered_label_data
     self.image_files = sorted(filtered_image_data)
   
@@ -311,6 +324,7 @@ class HENDatasetV2(BaseDataset):
     
   def __getitem__(self, idx):
     idx = random.choice([int(i) for i in range(len(self.image_files))])
+    #print(self.image_files[idx])
     image = cv2.imread(self.image_files[idx])
     if self.data_cfg['RGB'] == False:
       image = cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)

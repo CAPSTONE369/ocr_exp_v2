@@ -2,7 +2,7 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 from torch.nn import CTCLoss, CrossEntropyLoss
-import os, sys
+import os, sys, re
 
 from loss import FocalLoss, SoftCrossEntropyLoss
 from torch.optim.lr_scheduler import CyclicLR
@@ -14,37 +14,105 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from label_converter_hennet import HangulLabelConverter, GeneralLabelConverter
 DEVICE=torch.device('cuda:6' if USE_CUDA else 'cpu')
 
-class MYCE(nn.Module):
-  def __init__(self):
+import bisect
+import math, warnings
+from torch.utils.data import Dataset
+from typing import (Generic, Iterable, Iterator, List, Optional, Sequence, Tuple, TypeVar, Union)
+T_co = TypeVar('T_co', covariant=True)
+T = TypeVar('T')
+class MultiDataset(Dataset):
+    datasets: List[Dataset[T_co]]
+    cumulative_sizes: List[int]
+
+    def __init__(self, datasets: Iterable[Dataset]) -> None:
+        super(MultiDataset, self).__init__()
+        self.datasets = list(datasets)
+        self.cumulative_sizes = sum([len(x) for x in datasets])
+        pointer = {}
+        for idx, dataset in enumerate(self.datasets):
+            pointer[idx] = 0
+        self.pointer = pointer
+    
+    def __len__(self):
+        return self.cumulative_sizes
+    
+    def __getitem__(self, idx):
+        cur_dataset = idx % len(self.datasets)
+        ptr = self.pointer[cur_dataset]
+        self.pointer[cur_dataset] = (ptr + 1) % len(self.datasets[cur_dataset])
+        return self.datasets[cur_dataset][ptr]
+
+def make_loss_weight(train_cfg, label_converter):
+  characters = ''.join(label_converter.characters)
+  weight = torch.ones(len(characters)) 
+  numerics_match = re.finditer(re.compile('[0-9]'), characters)
+  for m in numerics_match:
+    weight[m.start():m.end()] = train_cfg['NUM_WEIGHT']
+  eng_mask = re.finditer(re.compile('[A-Za-z]'), characters)
+  for m in eng_mask:
+    weight[m.start():m.end()] = train_cfg['ENG_WEIGHT']
+  return weight
+  
+class FocalCE(nn.Module):
+  def __init__(self, train_cfg):
     super().__init__()
-  def forward(self, predict, target, ignore=False):
-    if ignore:
-      ignore_map = target[:, :, 0] == 1 ## 0번째를 정답으로
-      target[ignore_map] = predict[ignore_map] = 0 ## 0번째가 정답인 위치에 대해서는 loss를 계산하지 않는다.
-      # target[ignore_map]= 0
-      # loss = F.cross_entropy(predict, target, reduction = 'none') ## 계산은 전부에 대해서 하지만
-      # average를 구할 때에는 null인 class는 제외한다.
+    self.size_average=True
+    self.sequence_normalize=True
+    self.sample_normalize=True
+    self.train_cfg = train_cfg
+
+  def forward(self, input, target):
+    length = torch.where(torch.argmax(target, dim=-1) == 0, 0, 1).sum(dim=1)
+    # target = torch.argmax(target, dim=-1)
+    batch_size, max_seq_length, class_n = target.size(0), target.size(1), target.size(2)
+    mask = torch.zeros(batch_size, max_seq_length, class_n)
+    for i in range(batch_size):
+      mask[i, :length[i], :].fill_(1) ## 실제 문자가 있는 애들은 1.0 그대로의 가중치를 사용한다.
+      mask[i, length[i]:, :].fill_(0.9) ## 공백인 애들은 0.9의 가중치로만 loss를 계산한다. -> 완전히 없애버리면 안됨
+      """ masking처리 할 때 공백을 완전히 없애면 안되는 이유
+      - 기본적으로 max_seq_length에 비해서 실제 데이터의 문자영역 length는 더 짧은 경우가 많다.
+      - 따라서 지워버리면 완전 공백으로 다 채우는 것이 유리하다고 판단하게 될수 있으며, sequence length전체에 backward pass로 loss의 gradient가 전달이 안된다.
+      - 결과적으로 모델이 원하는대로 학습이 안 되는 것이다.
       """
-      indices = torch.stack([
-        torch.where(x == False)[0][-1] for x in ignore_map
-      ], dim=0)
-      """
-      # loss /= torch.unsqueeze(indices, -1)
-      
+    mask = mask.type_as(input)
+    # max_length = max(length)
+    max_length = max(length) # input.size(1)
+    input = input * mask
+    output = F.cross_entropy(input, target, reduction ='none')
+    output = torch.sum(output)
+    """
+    target = target[:, :max_length]
+    mask = mask[:, :max_length]
+    input = input.contiguous().view(-1, input.size(2))
+    input = F.log_softmax(input, dim=1)
+    target = target.contiguous().view(-1, 1)
+    mask = mask.contiguous().view(-1, 1)
+    output = - input.gather(1, target.long()) * mask
+    output = torch.sum(output)
+    """
+    if self.sequence_normalize:
+      output = output / torch.sum(mask[:,:,0])
+    if self.sample_normalize: ## 보통 batch에 대해서만 normalize를 하지 전체 sequence에 대해서는 안함
+      output = output / batch_size
     
-    return F.cross_entropy(predict, target, reduction = 'mean')
+    return output
+
     
-def make_loss_fn(train_cfg):
+def make_loss_fn(train_cfg, label_converter):
   if train_cfg['LOSS_FN'] == 'CTC': 
     ## 근데 이 loss function은 RNN과 같은 모듈이 포함되어 있을때 (예측 부분으로) 사용하는 것이 맞다.
     criterion = CTCLoss()
   elif train_cfg['LOSS_FN'] == 'SOFTCE':
     criterion = SoftCrossEntropyLoss()
+
   elif train_cfg['LOSS_FN'] == 'CE':
-    # criterion = MYCE()
-    criterion = CrossEntropyLoss()
+    if train_cfg['LOSS_WEIGHT'] and isinstance(label_converter, HangulLabelConverter):
+      weight = make_loss_weight(train_cfg, label_converter)
+      criterion= CrossEntropyLoss(weight = weight)
+    else:
+      criterion = CrossEntropyLoss()
   elif train_cfg['LOSS_FN'] == 'FOCAL':
-    criterion = FocalLoss()
+    criterion = FocalCE(train_cfg)
   return criterion
 
 def train_one_epoch(model, train_dataloader, optimizer, \
@@ -52,11 +120,12 @@ def train_one_epoch(model, train_dataloader, optimizer, \
   loop=tqdm(train_dataloader)
   model.train()
   torch.set_grad_enabled(True)
-  criterion = make_loss_fn(train_cfg)
+  criterion = make_loss_fn(train_cfg, label_converter)
   outs = []
 
   for idx, batch in enumerate(loop):
     image, label, text,_ = batch
+    # logger.info(f"IMAGE_SHAPE: {image.shape}")
     pred = model(image.to(DEVICE), mode='train', batch_size=image.shape[0]) ## [B, L, C]
     
     if train_cfg['LOSS_FN'] == "CTC":
@@ -67,11 +136,7 @@ def train_one_epoch(model, train_dataloader, optimizer, \
       target_lengths = torch.randint(low=1, high=pred.shape[2], size=(B,), dtype=torch.long)
       loss = criterion(pred, label.to(DEVICE),input_lengths, target_lengths)
     elif train_cfg['LOSS_FN'] == 'FOCAL':
-      argm_label = torch.argmax(label, dim=-1)
-      length = torch.stack([
-        torch.argmin(x, dim=-1) for x in argm_label
-      ], dim=0)
-      loss = criterion(pred, label.to(DEVICE), length)
+      loss = criterion(pred, label.to(DEVICE),)
     else:
       loss = criterion(pred, label.to(DEVICE))
       # loss = criterion(pred, label.to(DEVICE), ignore=False)## ignore index 대신에 사용함 -> One hot encoding된 target으로 cross entropy를 하면 ignore_index를 사용할 수 없으니 NULL target인 정답은 예측 제외
@@ -206,20 +271,26 @@ if __name__ == "__main__":
       train_dataset = HENDatasetOutdoor(mode='train', DATA_CFG=data_cfg, ratio = ratio[idx])
       use_datasets.append(train_dataset)
 
-    if 'HENDatasetV2'  == i:
+    if 'HENDatasetV2' == i:
       train_dataset = HENDatasetV2(mode='train', DATA_CFG=data_cfg, ratio=ratio[idx])
       use_datasets.append(train_dataset)
     
-    if 'HENDatasetV3' == i:
-      if data_cfg['USE_MEDICINE']:
-        train_dataset = HENDatasetV3(mode='train', DATA_CFG=data_cfg, ratio = ratio[idx], base_dir='/home/guest/speaking_fridgey/ocr_exp_v2/data/medicine_croped')
+    if 'HENDatasetV3' == i: ## 한국어 인쇄체 데이터셋이 아닌 경우에는 무조건 한글이 포함되어 있는 데이터만 사용하도록 한다.
+      if data_cfg['USE_BANK']:
+        train_dataset = HENDatasetV3(mode='train', DATA_CFG=data_cfg, ratio= 1.0,
+          base_dir ='/home/guest/speaking_fridgey/ocr_exp_v2/data/finance_croped', target_num=False, target_eng=False, only_hangul=True)
         use_datasets.append(train_dataset)
-      if data_cfg['USE_COSMETICS']:
-        train_dataset = HENDatasetV3(mode='train', DATA_CFG=data_cfg, ratio=ratio[idx], base_dir='/home/guest/speaking_fridgey/ocr_exp_v2/data/cosmetics_croped')
+      if data_cfg['USE_MEDICINE']: ## 의약품 패키지 데이터셋
+        train_dataset = HENDatasetV3(mode='train', DATA_CFG=data_cfg, ratio = ratio[idx], 
+          base_dir='/home/guest/speaking_fridgey/ocr_exp_v2/data/medicine_croped', target_num= False, target_eng=False, only_hangul=True)
+        use_datasets.append(train_dataset)
+      if data_cfg['USE_COSMETICS']: ## 화장품 패키지 데이터셋
+        train_dataset = HENDatasetV3(mode='train', DATA_CFG=data_cfg, ratio=ratio[idx],
+           base_dir='/home/guest/speaking_fridgey/ocr_exp_v2/data/cosmetics_croped', target_num = True, target_eng =False, only_hangul=True)
         use_datasets.append(train_dataset)
 
   ## MAKE THE CONCATENATED DATASET ##
-  train_dataset = ConcatDataset(use_datasets) 
+  train_dataset = MultiDataset(use_datasets) # ConcatDataset(use_datasets) 
   if 'V3' in data_cfg['DATASET']:
     test_dataset = HENDatasetV3(mode='test', DATA_CFG=data_cfg, ratio=1.0) ## TEST WITH DATA WITH V2 or V3
   else:
@@ -246,6 +317,7 @@ if __name__ == "__main__":
   model = HENNet(
       img_w=model_cfg['IMG_W'], img_h=model_cfg['IMG_H'], res_in=model_cfg['RES_IN'],
       encoder_layer_num=model_cfg['ENCODER_LAYER_NUM'], 
+      make_object_query = model_cfg['MAKE_OBJECT_QUERY'],
       use_resnet=model_cfg['USE_RES'],
       activation=model_cfg['ACTIVATION'],
       seperable_ffn=model_cfg['SEPERABLE_FFN'],
@@ -253,6 +325,8 @@ if __name__ == "__main__":
       batch_size=model_cfg['BATCH_SIZE'],
       rgb=model_cfg['RGB'],
       tps=model_cfg['TPS'],
+      use_conv = model_cfg['USE_CONV'],
+      attentional_transformer = model_cfg['ATTENTIONAL_TRANSFORMER'],
       head_num=model_cfg['HEAD_NUM'],
       max_seq_length=label_converter.max_length, # model_cfg['MAX_SEQ_LENGTH'],
       embedding_dim=model_cfg['EMBEDDING_DIM'],
@@ -315,7 +389,9 @@ if __name__ == "__main__":
 
     if isinstance(train_dataset, torch.utils.data.ConcatDataset):
       for ds in train_dataset.datasets:
-        ds._shuffle()
+        if isinstance(ds, HENDatasetV3):
+          ds._shuffle()
+        
         
     # scheduler.step()
     logger.info(f"EPOCH: {epoch+1} LR: {scheduler.get_last_lr()} LOSS: {epoch_loss}")
